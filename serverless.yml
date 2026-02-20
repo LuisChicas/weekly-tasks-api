@@ -1,0 +1,52 @@
+service: weekly-tasks-api
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: us-east-2
+  stage: ${opt:stage, 'dev'}
+  environment:
+    TABLE_NAME: !Ref TaskListsTable
+
+functions:
+  api:
+    handler: src/handler.handler
+    events:
+      - httpApi:
+          method: ANY
+          path: /{proxy+}
+      - httpApi:
+          method: ANY
+          path: /
+
+resources:
+  Resources:
+    TaskListsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${self:provider.stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: PK
+            AttributeType: S
+          - AttributeName: SK
+            AttributeType: S
+        KeySchema:
+          - AttributeName: PK
+            KeyType: HASH
+          - AttributeName: SK
+            KeyType: RANGE
+
+plugins:
+  - serverless-esbuild
+  - serverless-offline
+
+custom:
+  serverless-offline:
+    httpPort: 3009
+  esbuild:
+    bundle: true
+    minify: false
+    sourcemap: true
+    platform: node
+    target: node20
