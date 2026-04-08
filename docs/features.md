@@ -46,7 +46,7 @@ Replaces the user's full state. Handles owned and shared lists separately:
 
 **Body**: `{ coins, activeLists, completedLists }`
 
-**Response**: `{ success: true }`
+**Response**: `{ success: true, coins, activeLists, completedLists, flags }` — returns fresh server state so the client doesn't need a follow-up GET
 
 ### Health
 
@@ -82,23 +82,23 @@ Replaces the user's full state. Handles owned and shared lists separately:
 
 ## Sync Strategy
 
-- Frontend works with local state (as it does today with localStorage)
-- Manual sync button triggers `PUT /sync` to push state to API
-- On load, `GET /sync` (or login response) provides full state
+- Frontend works with local state; syncs to API automatically or manually
+- **Auto-sync**: timer fires after changes (5 min normal, 1 min for shared list changes); triggered on blur for text edits
+- **Manual sync**: user clicks the sync button in the top bar
+- On load, `GET /sync` (or login/register response) provides full state
 - Typical session: 1 call to load, 1 call to save = 2 Lambda invocations
+
+## Shared Lists
+
+- Owner shares a list by username; recipients see it in their active lists
+- **Only the owner** can change who the list is shared with; only the owner can complete it
+- **All users earn coins** when the owner completes a shared list (same formula: 1 + days early)
+- Both owner and recipients can edit list items; **last-write-wins** at the list level (based on `updatedAt`)
+- When the owner completes a shared list, the API automatically: awards coins to all recipients, adds the list to their completed archive, and removes their shared-list pointer
 
 ## Feature Flags
 
 Server-side feature flag system with per-user targeting. Flags are evaluated on every auth/sync response so the frontend always has the latest values.
-
-### Schema
-
-- **Flag definitions** (`PK=FLAGS, SK=FLAG#<name>`): global config with `flagType` (string/boolean/number), `defaultValue`, `enabled`, and `description`
-- **Per-user overrides** (`PK=USER#<uuid>, SK=FLAG#<name>`): override `value` for a specific user
-
-### Evaluation
-
-For each enabled flag definition: if the user has a `FLAG#<name>` override, use it; otherwise use `defaultValue`. Evaluated in `getUserState()` alongside user data (parallel DynamoDB queries, no extra latency).
 
 ### Current Flags
 
@@ -108,4 +108,5 @@ For each enabled flag definition: if the user has a `FLAG#<name>` override, use 
 
 ## TBD
 
-- Shared lists (in progress — see `docs/features.sharedLists.md`)
+- Notifications / reminders for approaching deadlines
+- CI/CD for automated deployments

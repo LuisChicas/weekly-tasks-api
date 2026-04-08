@@ -18,8 +18,8 @@
 ```
 weekly-tasks-api/
 ├── docs/
-│   ├── features.md
-│   └── tech.md
+│   ├── features.md         # Product features and API contract
+│   └── tech.md             # Architecture, infrastructure, data model
 ├── scripts/
 │   └── seed-flags.ts           # Seeds flag definitions + per-user overrides
 ├── src/
@@ -50,7 +50,7 @@ Single-table design: `weekly-tasks-api-{stage}`
 | Entity | PK | SK | Key Attributes |
 |---|---|---|---|
 | User | `USER#<uuid>` | `PROFILE` | username, passwordHash, coins, createdAt |
-| Active list | `USER#<uuid>` | `LIST#<listId>` | title, deadline, items, ownerId, sharedWith, updatedAt |
+| Active list | `USER#<uuid>` | `LIST#<listId>` | title, deadline, items, ownerId, sharedWith, updatedAt (always set by server on write) |
 | Completed list | `USER#<uuid>` | `COMPLETED#<listId>` | title, deadline, items |
 | Shared list pointer | `USER#<recipientId>` | `SHARED#<listId>` | ownerId, ownerUsername |
 | Flag definition | `FLAGS` | `FLAG#<flagName>` | flagName, flagType, defaultValue, enabled, description |
@@ -63,6 +63,19 @@ Single-table design: `weekly-tasks-api-{stage}`
 ### Billing
 
 PAY_PER_REQUEST (on-demand, scales to zero).
+
+### Shared List Concurrency
+
+- `batchWriteLists()` always writes `updatedAt: new Date().toISOString()` on every owned-list write
+- Non-owner (recipient) writes are accepted only when: `!storedUpdatedAt || (incomingUpdatedAt && incomingUpdatedAt >= storedUpdatedAt)`
+- This prevents a stale client from overwriting a newer server copy on sync
+
+### Feature Flags Schema
+
+- **Flag definitions**: `PK=FLAGS`, `SK=FLAG#<name>` — global config with `flagType`, `defaultValue`, `enabled`, `description`
+- **Per-user overrides**: `PK=USER#<uuid>`, `SK=FLAG#<name>` — stores `value` for a specific user
+- Evaluated in `getUserState()` via `evaluateFlags(defaults, userItems)`: user override wins, falls back to `defaultValue` for enabled flags
+- Fetched in parallel with user data (no extra latency)
 
 ## Infrastructure
 

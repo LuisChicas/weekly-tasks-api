@@ -23,18 +23,20 @@ interface ListItem {
   updatedAt?: string;
 }
 
-// Helper: write lists to DynamoDB in batches of 25 (DynamoDB limit).
-// Only writes owned lists — shared lists are written to the owner's partition in sync.ts.
+// Helper: write lists to DynamoDB. Active lists use conditional writes to preserve newer recipient
+// edits; completed lists are batched with no guard (no sharing semantics apply).
 async function batchWriteLists(
   userId: string,
   activeLists: ListItem[],
   completedLists: ListItem[]
 ): Promise<void> {
-  const requests: Array<{ PutRequest: { Item: Record<string, unknown> } }> = [];
-
+  // Write each active list individually with an updatedAt guard so a stale owner sync cannot
+  // overwrite a more recent edit that a recipient already wrote to the owner's partition.
   for (const list of activeLists.filter(l => !l.isShared)) {
-    requests.push({
-      PutRequest: {
+    const incomingUpdatedAt = list.updatedAt || new Date().toISOString();
+    try {
+      await docClient.send(new PutCommand({
+        TableName: TABLE_NAME,
         Item: {
           PK: `USER#${userId}`,
           SK: `LIST#${list.id}`,
@@ -43,29 +45,35 @@ async function batchWriteLists(
           items: list.items,
           ...(list.ownerId !== undefined && { ownerId: list.ownerId }),
           ...(list.sharedWith !== undefined && { sharedWith: list.sharedWith }),
-          ...(list.updatedAt !== undefined && { updatedAt: list.updatedAt }),
+          updatedAt: incomingUpdatedAt,
         },
-      },
-    });
+        // Only write if the server has no timestamp yet, or ours is at least as recent
+        ConditionExpression: 'attribute_not_exists(updatedAt) OR updatedAt <= :incomingAt',
+        ExpressionAttributeValues: { ':incomingAt': incomingUpdatedAt },
+      }));
+    } catch (err: unknown) {
+      // ConditionalCheckFailedException means the server has a newer version (e.g. a recipient
+      // edit arrived after the owner loaded their state) — safe to skip, response will return fresh state
+      if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
+    }
   }
 
-  for (const list of completedLists) {
-    requests.push({
-      PutRequest: {
-        Item: {
-          PK: `USER#${userId}`,
-          SK: `COMPLETED#${list.id}`,
-          title: list.title,
-          deadline: list.deadline,
-          items: list.items,
-        },
+  // Completed lists have no sharing semantics — batch write as before
+  const completedRequests = completedLists.map(list => ({
+    PutRequest: {
+      Item: {
+        PK: `USER#${userId}`,
+        SK: `COMPLETED#${list.id}`,
+        title: list.title,
+        deadline: list.deadline,
+        items: list.items,
       },
-    });
-  }
+    },
+  }));
 
   // DynamoDB BatchWrite limit is 25 items per request
-  for (let i = 0; i < requests.length; i += 25) {
-    const batch = requests.slice(i, i + 25);
+  for (let i = 0; i < completedRequests.length; i += 25) {
+    const batch = completedRequests.slice(i, i + 25);
     await docClient.send(new BatchWriteCommand({
       RequestItems: { [TABLE_NAME]: batch },
     }));

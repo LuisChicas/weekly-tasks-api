@@ -33,6 +33,21 @@ async function lookupUserId(username: string): Promise<string | null> {
   return (result.Items[0].PK as string).replace('USER#', '');
 }
 
+// Strips subtasks with empty text from list items before persisting to prevent ghost entries
+function sanitizeItems(items: unknown[]): unknown[] {
+  return (items as Array<Record<string, unknown>>).map(item => {
+    if (item.type === 'task' && Array.isArray(item.subtasks)) {
+      return {
+        ...item,
+        subtasks: (item.subtasks as Array<{ text?: string }>).filter(
+          st => typeof st.text === 'string' && st.text.trim() !== ''
+        ),
+      };
+    }
+    return item;
+  });
+}
+
 // Replaces all user lists and coins — handles owned lists, shared list writes, and completion fanout
 router.put('/', async (req: AuthRequest, res: Response) => {
   try {
@@ -187,10 +202,10 @@ router.put('/', async (req: AuthRequest, res: Response) => {
         TableName: TABLE_NAME,
         Key: { PK: `USER#${list.ownerId}`, SK: `LIST#${list.id}` },
       }));
-      // Only update if incoming updatedAt is newer (or no timestamp on either side)
+      // Only update if stored has no timestamp yet, or incoming has a timestamp that is at least as new
       const storedUpdatedAt = stored.Item?.updatedAt as string | undefined;
       const incomingUpdatedAt = list.updatedAt;
-      if (!storedUpdatedAt || !incomingUpdatedAt || incomingUpdatedAt >= storedUpdatedAt) {
+      if (!storedUpdatedAt || (incomingUpdatedAt && incomingUpdatedAt >= storedUpdatedAt)) {
         await docClient.send(new PutCommand({
           TableName: TABLE_NAME,
           Item: {
@@ -198,7 +213,7 @@ router.put('/', async (req: AuthRequest, res: Response) => {
             SK: `LIST#${list.id}`,
             title: list.title,
             deadline: list.deadline || '',
-            items: list.items || [],
+            items: sanitizeItems(list.items || []),
             ownerId: list.ownerId,
             // Preserve sharedWith from server — only owner can change who the list is shared with
             sharedWith: stored.Item?.sharedWith,
@@ -208,8 +223,9 @@ router.put('/', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Write all owned lists and coins
-    await batchWriteLists(userId, ownedActive, completedLists);
+    // Write all owned lists and coins (sanitize items to strip any empty subtasks)
+    const sanitizedOwned = (ownedActive as ListBody[]).map(l => ({ ...l, items: sanitizeItems(l.items || []) })) as typeof completedLists;
+    await batchWriteLists(userId, sanitizedOwned, completedLists);
 
     if (typeof coins === 'number') {
       await docClient.send(new UpdateCommand({
@@ -220,7 +236,9 @@ router.put('/', async (req: AuthRequest, res: Response) => {
       }));
     }
 
-    res.json({ success: true });
+    // Return up-to-date state (avoids a follow-up GET /sync call on the client)
+    const state = await getUserState(userId);
+    res.json({ success: true, ...state });
   } catch (err) {
     console.error('Sync put error:', err);
     res.status(500).json({ error: 'Internal server error' });
